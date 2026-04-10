@@ -1,0 +1,6 @@
+[submodule "pipTrek-be"]
+	path = pipTrek-be
+	url = https://github.com/YeenYan/pipTrek-be.git
+[submodule "pipTrek-fe"]
+	path = pipTrek-fe
+	url = https://github.com/YeenYan/pipTrek-fe.git
