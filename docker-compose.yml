@@ -1,172 +1,103 @@
-###############################################################################
-# docker-compose.yml — pipTrek Infrastructure Orchestration
-###############################################################################
-#
-# This file defines and orchestrates all services for the pipTrek application.
-# It is designed to work with the infra-pipTrek repository structure where:
-#   - pipTrek-be/ and pipTrek-fe/ are Git submodules (read-only source code)
-#   - docker/be/ and docker/fe/ contain the Dockerfiles (infrastructure layer)
-#
-# Usage:
-#   docker compose build          # Build all service images
-#   docker compose up -d          # Start all services in detached mode
-#   docker compose down           # Stop and remove all containers
-#   docker compose logs -f        # Follow logs from all services
-#
-# Prerequisites:
-#   - Docker Engine 20.10+
-#   - Docker Compose V2 (docker compose, not docker-compose)
-#   - Git submodules initialized (git submodule update --init --recursive)
-#
-###############################################################################
+﻿services:
+ # ─── Database ───────────────────────────────────────────────────────────────
+ postgres:
+  image: postgres:16-alpine
+  container_name: piptrek_postgres
+  restart: unless-stopped
+  environment:
+   POSTGRES_DB: piptrek
+   POSTGRES_USER: postgres
+   POSTGRES_PASSWORD: admin
+  volumes:
+   - postgres_data:/var/lib/postgresql/data
+  ports:
+   - "5432:5432"
+  healthcheck:
+   test: ["CMD-SHELL", "pg_isready -U postgres -d piptrek"]
+   interval: 5s
+   timeout: 5s
+   retries: 10
 
-services:
+ # ─── Backend (Laravel) ──────────────────────────────────────────────────────
+ be:
+  build:
+   context: ./pipTrek-be
+   dockerfile: ../docker/be/Dockerfile
+  container_name: piptrek_be
+  restart: unless-stopped
+  working_dir: /var/www/html
+  volumes:
+   - ./pipTrek-be:/var/www/html # hot-reload: live PHP file changes
+   - be_vendor:/var/www/html/vendor # persisted vendor dir
+  ports:
+   - "8000:8000"
+  depends_on:
+   postgres:
+    condition: service_healthy
+  environment:
+   APP_ENV: local
+   APP_DEBUG: "true"
+   APP_URL: http://localhost:8000
+   DB_CONNECTION: pgsql
+   DB_HOST: postgres
+   DB_PORT: 5432
+   DB_DATABASE: piptrek
+   DB_USERNAME: postgres
+   DB_PASSWORD: admin
+   QUEUE_CONNECTION: database
+   CACHE_STORE: database
+   SESSION_DRIVER: database
+  command: ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000"]
 
-  # ===========================================================================
-  # Backend Service — Laravel 12 API (PHP 8.2 + Apache)
-  # ===========================================================================
-  # The backend serves the GraphQL API via Lighthouse at /graphql.
-  # It runs PHP 8.2 with Apache, using the multi-stage Dockerfile that:
-  #   1. Installs Composer dependencies (production only)
-  #   2. Builds Vite assets (Tailwind CSS + JS)
-  #   3. Produces a lean Apache-based production image
-  #
-  backend:
-    # Build configuration:
-    #   context: pipTrek-be/ — the Laravel source code is the build context,
-    #     so COPY instructions in the Dockerfile reference files relative to it.
-    #   dockerfile: Dockerfile path is relative to the repo root (not context),
-    #     pointing to the infrastructure layer where Dockerfiles live.
-    build:
-      context: ./pipTrek-be
-      dockerfile: ../docker/be/Dockerfile
+ # ─── Queue Worker ────────────────────────────────────────────────────────────
+ queue:
+  build:
+   context: ./pipTrek-be
+   dockerfile: ../docker/be/Dockerfile
+  container_name: piptrek_queue
+  restart: unless-stopped
+  working_dir: /var/www/html
+  volumes:
+   - ./pipTrek-be:/var/www/html
+   - be_vendor:/var/www/html/vendor
+  depends_on:
+   postgres:
+    condition: service_healthy
+   be:
+    condition: service_started
+  environment:
+   APP_ENV: local
+   APP_DEBUG: "true"
+   APP_URL: http://localhost:8000
+   DB_CONNECTION: pgsql
+   DB_HOST: postgres
+   DB_PORT: 5432
+   DB_DATABASE: piptrek
+   DB_USERNAME: postgres
+   DB_PASSWORD: admin
+   QUEUE_CONNECTION: database
+   CACHE_STORE: database
+   SESSION_DRIVER: database
+  command: ["php", "artisan", "queue:listen", "--tries=1", "--timeout=0"]
 
-    # Container name for easy identification in docker ps and logs.
-    container_name: piptrek-backend
+ # ─── Frontend (Vue + Vite) ──────────────────────────────────────────────────
+ fe:
+  build:
+   context: ./pipTrek-fe
+   dockerfile: ../docker/fe/Dockerfile
+  container_name: piptrek_fe
+  restart: unless-stopped
+  volumes:
+   - ./pipTrek-fe:/app # hot-reload: live file changes
+   - fe_node_modules:/app/node_modules # persisted node_modules
+  ports:
+   - "5173:5173"
+  depends_on:
+   - be
+  environment:
+   - VITE_API_URL=http://localhost:8000
 
-    # Restart policy: always restart unless explicitly stopped.
-    # This ensures the backend recovers from crashes or OOM kills.
-    restart: unless-stopped
-
-    # Port mapping: host:container
-    # Maps host port 8000 to container port 80 (Apache inside the container).
-    # Access the backend at http://localhost:8000
-    # GraphQL endpoint: http://localhost:8000/graphql
-    # Health check: http://localhost:8000/up
-    ports:
-      - "8000:80"
-
-    # Environment variables for the Laravel application.
-    # These override values in .env and are read by Laravel's env() helper.
-    # IMPORTANT: For production, replace placeholder values with real secrets
-    # and consider using Docker secrets or a .env file for sensitive data.
-    environment:
-      - APP_NAME=pipTrek
-      - APP_ENV=production
-      - APP_DEBUG=false
-      - APP_URL=http://localhost:8000
-      - APP_KEY=${APP_KEY:-}
-      - LOG_CHANNEL=stderr
-      - LOG_LEVEL=info
-      - DB_CONNECTION=sqlite
-      - DB_DATABASE=/var/www/html/database/database.sqlite
-      - CACHE_STORE=file
-      - SESSION_DRIVER=file
-      - QUEUE_CONNECTION=sync
-      - JWT_SECRET=${JWT_SECRET:-}
-
-    # Volumes for persistent data and development convenience.
-    #   database volume: Persists the SQLite database file across container
-    #     restarts. Without this, data is lost when the container is recreated.
-    #   storage volume: Persists Laravel storage (logs, cache, uploaded files).
-    volumes:
-      - backend-database:/var/www/html/database
-      - backend-storage:/var/www/html/storage
-
-    # Connect to the shared application network for inter-service communication.
-    networks:
-      - piptrek-network
-
-    # Health check to verify the backend is responding.
-    # Laravel registers a /up health endpoint in bootstrap/app.php.
-    # Docker uses this to determine if the container is healthy.
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/up"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-  # ===========================================================================
-  # Frontend Service — Vue 3 SPA (Nginx)
-  # ===========================================================================
-  # The frontend is a Vue 3 Single Page Application served by Nginx.
-  # The multi-stage Dockerfile:
-  #   1. Installs npm dependencies and runs type checking
-  #   2. Builds the SPA with Vite (outputs to dist/)
-  #   3. Copies static files into an Nginx Alpine image (~25MB)
-  #
-  frontend:
-    # Build configuration:
-    #   context: pipTrek-fe/ — the Vue source code is the build context.
-    #   dockerfile: Points to the infrastructure layer Dockerfile.
-    build:
-      context: ./pipTrek-fe
-      dockerfile: ../docker/fe/Dockerfile
-
-    # Container name for easy identification.
-    container_name: piptrek-frontend
-
-    # Restart policy: always restart unless explicitly stopped.
-    restart: unless-stopped
-
-    # Port mapping: host:container
-    # Maps host port 3000 to container port 80 (Nginx inside the container).
-    # Access the frontend at http://localhost:3000
-    ports:
-      - "3000:80"
-
-    # The frontend depends on the backend being available.
-    # depends_on with condition ensures the backend passes its health check
-    # before the frontend container starts. This prevents the SPA from
-    # making API calls to a backend that isn't ready yet.
-    depends_on:
-      backend:
-        condition: service_healthy
-
-    # Connect to the shared network so the frontend container can
-    # communicate with the backend if needed (e.g., server-side proxying).
-    networks:
-      - piptrek-network
-
-
-# =============================================================================
-# Named Volumes
-# =============================================================================
-# Named volumes persist data across container restarts and rebuilds.
-# Docker manages these volumes — they survive `docker compose down`
-# but are removed with `docker compose down -v`.
-#
 volumes:
-  # Stores the SQLite database file for the backend.
-  # Ensures data persists when the backend container is recreated.
-  backend-database:
-    driver: local
-
-  # Stores Laravel's storage directory (logs, cache, sessions, uploads).
-  # Preserves application state across container restarts.
-  backend-storage:
-    driver: local
-
-
-# =============================================================================
-# Networks
-# =============================================================================
-# A custom bridge network for inter-service communication.
-# Containers on this network can reach each other by service name
-# (e.g., the frontend can call http://backend:80/graphql).
-# The bridge driver is Docker's default and provides DNS-based discovery.
-#
-networks:
-  piptrek-network:
-    driver: bridge
+ postgres_data:
+ be_vendor:
+ fe_node_modules:
